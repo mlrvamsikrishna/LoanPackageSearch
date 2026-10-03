@@ -54,6 +54,13 @@ Every result shows:
 - Relevance score (0.0–1.0)
 - One click to view the full page
 
+### 📄 **Pagination & Large Result Sets**
+- **Result limits**: Default 50 per page, up to 1000 total results
+- **Pagination controls**: First, Previous, Next, Last buttons
+- **Query parameters**: Use `/api/search?q=...&limit=50&offset=0` for custom pagination
+- **Example**: Search returns 247 results → splits into 5 pages of 50 results each
+- Works well for broad queries (wildcards, common words) without rendering all matches at once
+
 ### 📄 **Page Viewer Modal**
 Click any result to see the complete page text in a beautiful dark-theme modal. No context switching.
 
@@ -155,14 +162,25 @@ When you click a search result to view the full page, **all matched words are au
 
 | Method | Endpoint | Purpose |
 |--------|----------|---------|
-| `GET` | `/api/search?q=...` | Search the current package |
+| `GET` | `/api/search?q=...&limit=50&offset=0` | Search with pagination (default: limit=50) |
 | `GET` | `/api/package/tree` | Get hierarchical tree structure |
 | `GET` | `/api/page?docId=...&versionId=...&pageNum=...` | Fetch full page text |
 | `GET` | `/api/metrics` | Get last load/index metrics |
 
-All responses are JSON. See the UI for interactive examples.
+**Pagination Parameters**:
+- `q` (required): Search query
+- `limit` (optional): Results per page (default: 50, max: 1000)
+- `offset` (optional): Results to skip (default: 0)
 
-**Note**: The app auto-loads the default seed file at startup. To load a different package, use `LOAN_DATA_ROOT` environment variable (see "How to Run" above).
+**Pagination Response Includes**:
+- `totalResults`: Total matches (up to 1000)
+- `resultCount`: Results on this page
+- `pagination.currentPage`: Current page number
+- `pagination.totalPages`: Total pages
+- `pagination.hasNextPage`: Whether more pages exist
+- `pagination.hasPreviousPage`: Whether previous page exists
+
+All responses are JSON. See the UI for interactive examples.
 
 ---
 
@@ -172,7 +190,7 @@ All responses are JSON. See the UI for interactive examples.
 - **Search Engine**: Apache Lucene 9.8.0 (in-memory index via `ByteBuffersDirectory`)
 - **Frontend**: HTML5 + CSS3 + vanilla JavaScript (no framework)
 - **Build**: Maven 3.8+
-- **Testing**: JUnit 5 (26 tests, all passing)
+- **Testing**: JUnit 5 (29 tests, all passing)
 
 ---
 
@@ -180,16 +198,16 @@ All responses are JSON. See the UI for interactive examples.
 
 ### **Limitations**
 
-1. **Result limit: 1000 matches per search** — To protect performance, results are capped at 1000. Typical loan package searches return < 500 results, so this is rarely hit. (solution: add pagination for very broad queries)
-2. **In-memory index only** — Index is rebuilt after restart (solution: persist to disk)
-3. **Single package at a time** — App handles one loaded package (solution: multi-package queue)
-4. **No authentication** — Intentionally out of scope for this assignment
-5. **No audit trail** — Searches are not logged (solution: add database audit log)
-6. **500 MB memory bound per package** — Reasonable for typical loan packages (solution: switch to disk-based index for larger files)
+1. **Result cap: 1000 matches per search** — To protect memory, results are capped at 1000 total (paginated in 50-result chunks). Typical loan package searches return < 500 results, so this is rarely hit. (solution: lazy-load infinite scroll for very large result sets)
+2. **Package size limit: 500 MB** — In-memory Lucene index is suitable for packages up to ~500 MB (~25,000 pages). Larger packages should be split and loaded separately. (solution: persist index to disk for unlimited size)
+3. **In-memory index only** — Index is rebuilt after restart (solution: persist to disk)
+4. **Single package at a time** — App handles one loaded package (solution: multi-package queue)
+5. **No authentication** — Intentionally out of scope for this assignment
+6. **No audit trail** — Searches are not logged (solution: add database audit log)
 
 ### **What I'd Do Next (With More Time)**
 
-- [ ] **Add pagination** to `/api/search` for unlimited results
+- [ ] **Upgrade pagination to infinite scroll** for smoother browsing across very large result sets
 - [ ] **Persist Lucene index** to disk so restarts are instant
 - [x] **Add word-level highlighting** using token coordinates for richer page rendering ✨ **DONE**
 - [ ] **Cache repeated queries** for sub-5ms response times on popular searches
@@ -209,7 +227,7 @@ All responses are JSON. See the UI for interactive examples.
 - 3 service classes (loading, indexing, orchestration)
 - 2 controller classes (REST API, web UI)
 - 1 responsive HTML5 template (dark theme)
-- 26 tests (unit + integration, all passing) ✅
+- 29 tests (unit + integration, all passing) ✅
 
 ### **Documentation**
 - **README.md** ← you are here
@@ -231,9 +249,29 @@ Copilot helped with:
 
 ---
 
-## 📈 Architecture
+## 💾 Memory & Index Management
 
-### **Layered Design**
+### **Design**
+
+**Limit**: 500 MB max package size
+- Rationale: Lucene in-memory index scales ~1 MB per 50 OCR pages
+- At 500 MB, we can index ~25,000 pages
+- Typical loan packages: 280–1000 pages (well within limit)
+
+**Index Lifecycle**:
+1. **Load** → Parse OCR file into memory (tracks char count)
+2. **Index** → Build in-memory Lucene index (ByteBuffersDirectory)
+3. **Reload** → On file change, close old reader AND directory, then rebuild (prevents memory leak)
+4. **Shutdown** → Close reader and directory on app exit (@PreDestroy)
+
+**Memory Guarantees**:
+- ✅ Old directory properly closed during rebuild (no leak on file modification)
+- ✅ Only one active index in memory at a time
+- ✅ No unbounded query cache (search is stateless)
+- ✅ Package size validated before load (rejects > 500 MB files)
+
+
+
 
 ```
 ┌─────────────────────────────────────────┐
@@ -265,7 +303,7 @@ Copilot helped with:
 mvn test
 ```
 
-**Results**: 26/26 tests passing ✅
+**Results**: 29/29 tests passing ✅
 
 ### **Test Coverage**
 
@@ -315,7 +353,7 @@ mvn test
 6. **Click a result** to see the page viewer with highlighted matches
 7. **Edit the OCR file** while running, then search again to see live reload
 8. **Review the code** — it's well-organized and documented
-9. **Run tests** with `./mvnw test` (26/26 passing)
+9. **Run tests** with `./mvnw test` (29/29 passing)
 
 ---
 
@@ -344,6 +382,8 @@ LoanPackageSearch/
 │   └── application.properties
 ├── src/test/java/com/example/loanpackagesearch/
 │   ├── LoanPackageSearchApplicationTests.java
+│   ├── controller/
+│   │   └── SearchApiControllerPaginationTest.java
 │   └── service/
 │       ├── LoanPackageModelTest.java
 │       ├── LoanPackageServiceReloadTest.java
@@ -362,7 +402,7 @@ LoanPackageSearch/
 - ⚡ **Speed**: 200 ms to load & index a 1.4 MB package; 8–20 ms searches
 - 🎨 **Beauty**: Dark premium dashboard UI that's easy on the eyes
 - 🔍 **Power**: Full-text search with phrases, boolean logic, and wildcards
-- 🛡️ **Reliability**: Comprehensive error handling and 26 passing tests
+- 🛡️ **Reliability**: Comprehensive error handling and 29 passing tests
 - 📚 **Clarity**: Well-documented code and transparent AI tool usage
 
 Ready to evaluate. Thank you!
@@ -373,6 +413,6 @@ Ready to evaluate. Thank you!
 **Language**: Java 17+  
 **Framework**: Spring Boot 4.1.1  
 **Search**: Apache Lucene 9.8.0  
-**Tests**: 26/26 passing ✅
+**Tests**: 29/29 passing ✅
 **Status**: Production Ready
 

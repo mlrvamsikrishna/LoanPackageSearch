@@ -48,7 +48,9 @@ public class SearchIndexService {
     private static final String FIELD_VERSION_ID = "versionId";
     private static final String FIELD_VERSION_NAME = "versionName";
     private static final String FIELD_PAGE_NUMBER = "pageNumber";
+
     private static final int MAX_RESULTS = 1000;
+
     private static final int SNIPPET_LENGTH = 200;
 
     private final Analyzer analyzer = new StandardAnalyzer();
@@ -60,14 +62,29 @@ public class SearchIndexService {
     /**
      * Builds or rebuilds the in-memory Lucene index for the given package.
      *
+     * Design:
+     * - Closes old reader and directory to prevent memory leaks
+     * - Supports reload scenarios where index is rebuilt multiple times
+     * - Memory bound: in-memory ByteBuffersDirectory suitable for packages up to ~500MB
+     *
      * @param loanPackage the package to index
      * @throws IOException if Lucene indexing fails
      */
     public synchronized void buildIndex(LoanPackage loanPackage) throws IOException {
         long startTime = System.currentTimeMillis();
+
+        // Close old reader if it exists
         if (reader != null) {
             try {
                 reader.close();
+            } catch (IOException ignored) {
+            }
+        }
+
+        // Close old directory if it exists (important for reload scenarios to prevent memory leak)
+        if (index != null) {
+            try {
+                index.close();
             } catch (IOException ignored) {
             }
         }

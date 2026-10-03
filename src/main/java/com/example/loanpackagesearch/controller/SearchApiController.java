@@ -47,30 +47,67 @@ public class SearchApiController {
     /**
      * Searches the loaded package for the supplied query.
      *
+     * Supports pagination via limit and offset parameters.
+     * Default: limit=50, offset=0 (first page of 50 results)
+     *
      * @param query the Lucene query string, such as "income" or "cash to close"
-     * @return search results ranked by relevance
+     * @param limit number of results per page (default: 50, max: 1000)
+     * @param offset number of results to skip (default: 0)
+     * @return paginated search results ranked by relevance
      */
     @GetMapping("/search")
-    public ResponseEntity<?> search(@RequestParam(name = "q", required = false) String query) {
+    public ResponseEntity<?> search(
+            @RequestParam(name = "q", required = false) String query,
+            @RequestParam(name = "limit", defaultValue = "50", required = false) int limit,
+            @RequestParam(name = "offset", defaultValue = "0", required = false) int offset) {
         try {
             if (query == null || query.trim().isEmpty()) {
                 return ResponseEntity.badRequest()
                         .body(Map.of("error", "Query parameter required"));
             }
 
+            // Validate pagination parameters
+            limit = Math.max(1, Math.min(limit, 1000));  // Clamp between 1 and 1000
+            offset = Math.max(0, offset);                 // Ensure offset is non-negative
+
             long startTime = System.currentTimeMillis();
-            List<SearchResult> results = loanPackageService.search(query);
+            List<SearchResult> allResults = loanPackageService.search(query);
             long endTime = System.currentTimeMillis();
 
-            List<Map<String, Object>> resultsList = results.stream()
+            // Calculate pagination
+            int totalResults = allResults.size();
+            int totalPages = totalResults == 0 ? 0 : (totalResults + limit - 1) / limit;
+            int normalizedOffset = offset;
+            if (totalPages > 0) {
+                int lastPageOffset = (totalPages - 1) * limit;
+                normalizedOffset = Math.min(offset, lastPageOffset);
+            } else {
+                normalizedOffset = 0;
+            }
+            int currentPage = totalPages == 0 ? 0 : (normalizedOffset / limit) + 1;
+
+            // Slice results for this page
+            int endIndex = Math.min(normalizedOffset + limit, totalResults);
+            List<SearchResult> pageResults = allResults.subList(normalizedOffset, endIndex);
+
+            List<Map<String, Object>> resultsList = pageResults.stream()
                     .map(this::searchResultToMap)
                     .collect(Collectors.toList());
 
             return ResponseEntity.ok(Map.of(
                     "status", "success",
                     "query", query,
-                    "resultCount", results.size(),
+                    "totalResults", totalResults,
+                    "resultCount", pageResults.size(),
                     "searchTimeMs", endTime - startTime,
+                    "pagination", Map.of(
+                            "currentPage", currentPage,
+                            "pageSize", limit,
+                            "totalPages", totalPages,
+                            "offset", normalizedOffset,
+                            "hasNextPage", endIndex < totalResults,
+                            "hasPreviousPage", normalizedOffset > 0
+                    ),
                     "results", resultsList
             ));
 

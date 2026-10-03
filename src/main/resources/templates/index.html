@@ -487,6 +487,51 @@
             box-shadow: 0 0 8px rgba(34, 211, 238, 0.4);
         }
 
+        /* Pagination Controls */
+        .pagination-controls {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            margin-top: 24px;
+            padding: 16px;
+            background: linear-gradient(135deg, rgba(15, 23, 42, 0.8), rgba(30, 41, 59, 0.8));
+            border: 1px solid rgba(148, 163, 184, 0.14);
+            border-radius: 12px;
+        }
+
+        .pagination-btn {
+            padding: 8px 14px;
+            background: linear-gradient(180deg, rgba(14, 165, 233, 0.9) 0%, rgba(91, 33, 182, 0.9) 100%);
+            color: white;
+            border: 1px solid rgba(148, 163, 184, 0.18);
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 12px rgba(14, 165, 233, 0.3);
+        }
+
+        .pagination-btn:hover:not(:disabled) {
+            background: linear-gradient(180deg, rgba(14, 165, 233, 1) 0%, rgba(91, 33, 182, 1) 100%);
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(14, 165, 233, 0.4);
+        }
+
+        .pagination-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            background: rgba(100, 116, 139, 0.5);
+        }
+
+        .pagination-info {
+            padding: 0 12px;
+            color: var(--gray-700);
+            font-size: 13px;
+            font-weight: 600;
+        }
+
         /* Empty State */
         .empty-state {
             text-align: center;
@@ -883,7 +928,11 @@
             packageLoaded: false,
             currentPackage: null,
             lastSearchTime: 0,
-            lastSearchQuery: ''
+            lastSearchQuery: '',
+            currentPage: 1,
+            pageSize: 50,
+            totalPages: 0,
+            totalResults: 0
         };
 
         // Initialize
@@ -1166,7 +1215,7 @@
             document.getElementById('performanceMetrics').innerHTML = metricsHtml;
         }
 
-        function performSearch() {
+        function performSearch(pageNum = 1) {
             if (!appState.packageLoaded) {
                 showError('Please load a package first');
                 return;
@@ -1179,11 +1228,13 @@
             }
 
             appState.lastSearchQuery = query;
+            appState.currentPage = pageNum;
 
             showLoading('Searching...');
 
+            const offset = (pageNum - 1) * appState.pageSize;
             const searchStart = Date.now();
-            fetch(`/api/search?q=${encodeURIComponent(query)}`)
+            fetch(`/api/search?q=${encodeURIComponent(query)}&limit=${appState.pageSize}&offset=${offset}`)
                 .then(res => res.json())
                 .then(data => {
                     appState.lastSearchTime = Date.now() - searchStart;
@@ -1191,6 +1242,13 @@
                     if (data.error) {
                         showError(`Search error: ${data.error}`);
                         return;
+                    }
+
+                    // Store pagination info
+                    if (data.pagination) {
+                        appState.totalResults = data.totalResults;
+                        appState.totalPages = data.pagination.totalPages;
+                        appState.currentPage = data.pagination.currentPage;
                     }
 
                     displayResults(data);
@@ -1212,11 +1270,16 @@
                 return;
             }
 
+            const pagination = data.pagination || {};
+            const currentPage = pagination.currentPage || 1;
+            const totalPages = pagination.totalPages || 1;
+            const totalResults = data.totalResults || data.resultCount;
+
             let html = `
                 <div class="results-header">
                     <div>
                         <div class="results-title">Search Results</div>
-                        <div class="results-meta">Found ${data.resultCount} matching pages</div>
+                        <div class="results-meta">Found ${totalResults} matching pages (Page ${currentPage} of ${totalPages})</div>
                     </div>
                     <div class="search-time">Search time: ${data.searchTimeMs}ms</div>
                 </div>
@@ -1242,6 +1305,24 @@
             });
 
             html += '</div>';
+
+            // Add pagination controls
+            if (totalPages > 1) {
+                html += `
+                    <div class="pagination-controls">
+                        <button class="pagination-btn" ${currentPage === 1 ? 'disabled' : ''}
+                                onclick="performSearch(1)">« First</button>
+                        <button class="pagination-btn" ${currentPage === 1 ? 'disabled' : ''}
+                                onclick="performSearch(${currentPage - 1})">‹ Previous</button>
+                        <span class="pagination-info">Page ${currentPage} of ${totalPages}</span>
+                        <button class="pagination-btn" ${currentPage === totalPages ? 'disabled' : ''}
+                                onclick="performSearch(${currentPage + 1})">Next ›</button>
+                        <button class="pagination-btn" ${currentPage === totalPages ? 'disabled' : ''}
+                                onclick="performSearch(${totalPages})">Last »</button>
+                    </div>
+                `;
+            }
+
             container.innerHTML = html;
         }
 

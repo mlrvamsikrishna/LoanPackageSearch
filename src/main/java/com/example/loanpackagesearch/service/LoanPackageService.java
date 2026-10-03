@@ -29,6 +29,8 @@ import java.util.logging.Logger;
 public class LoanPackageService {
     private static final Logger logger = Logger.getLogger(LoanPackageService.class.getName());
 
+    private static final long MAX_PACKAGE_BYTES = 500 * 1024 * 1024;  // 500 MB
+
     @Value("${app.data-root:./data}")
     private String dataRoot;
 
@@ -183,6 +185,16 @@ public class LoanPackageService {
     }
 
     private PerformanceMetrics loadAndIndexPackage(File file, String packageDisplayName, boolean isDefault) throws IOException {
+        // Enforce memory limit: check file size before loading
+        if (file.length() > MAX_PACKAGE_BYTES) {
+            throw new IOException(String.format(
+                "Package size (%d MB) exceeds maximum limit (%d MB). " +
+                "Split into smaller files or increase MAX_PACKAGE_BYTES constant.",
+                file.length() / 1024 / 1024,
+                MAX_PACKAGE_BYTES / 1024 / 1024
+            ));
+        }
+
         long totalStartTime = System.currentTimeMillis();
 
         try {
