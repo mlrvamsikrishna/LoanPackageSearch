@@ -5,18 +5,32 @@
 
 ---
 
-## 🚀 How to Run (One Command)
+## 🚀 How to Run
+
+### **Default (Built-in Seed)**
 
 ```bash
 ./mvnw spring-boot:run
 ```
 
+The app auto-loads `./data/loan-package-seed.txt` at startup and builds a searchable index.
+
 Open your browser to **http://localhost:8080**
 
-That's it. The app loads your loan package and builds a searchable index automatically.
+### **Custom File Path via Environment Variable**
 
-By default, it loads the seed file from `./data/loan-package-seed.txt`.
-If you want to use a different source, set `LOAN_DATA_ROOT` to point at another file or directory.
+```bash
+LOAN_DATA_ROOT=/path/to/your/file.txt ./mvnw spring-boot:run
+```
+
+Or on macOS/Linux:
+
+```bash
+export LOAN_DATA_ROOT=/path/to/your/custom-loan-package.txt
+./mvnw spring-boot:run
+```
+
+Then open **http://localhost:8080**
 
 ---
 
@@ -85,10 +99,10 @@ Why this structure?
 
 ### **Benchmark Setup**
 
-I generated a **550-page synthetic OCR sample** with realistic loan terms and measured timing using:
+I generated a **550-page synthetic OCR sample** with realistic loan terms and measured timing:
 
 1. Created a 550-page text file with form-feed (`\f`) separators (OCR standard)
-2. Loaded it via `POST /api/load?path=...`
+2. Set `LOAN_DATA_ROOT` to the test file and started the app
 3. Measured search timing on `GET /api/search?q=income` using `curl --time_total`
 4. Ran the search twice to compare first vs. repeat performance
 
@@ -141,13 +155,14 @@ When you click a search result to view the full page, **all matched words are au
 
 | Method | Endpoint | Purpose |
 |--------|----------|---------|
-| `POST` | `/api/load?path=...` | Load a package from file |
 | `GET` | `/api/search?q=...` | Search the current package |
 | `GET` | `/api/package/tree` | Get hierarchical tree structure |
 | `GET` | `/api/page?docId=...&versionId=...&pageNum=...` | Fetch full page text |
 | `GET` | `/api/metrics` | Get last load/index metrics |
 
 All responses are JSON. See the UI for interactive examples.
+
+**Note**: The app auto-loads the default seed file at startup. To load a different package, use `LOAN_DATA_ROOT` environment variable (see "How to Run" above).
 
 ---
 
@@ -171,18 +186,6 @@ All responses are JSON. See the UI for interactive examples.
 4. **No audit trail** — Searches are not logged (solution: add database audit log)
 5. **500 MB memory bound per package** — Reasonable for typical loan packages (solution: switch to disk-based index for larger files)
 
-### **What I'd Do Next (With More Time)**
-
-- [ ] **Persist Lucene index** to disk so restarts are instant
-- [x] **Add word-level highlighting** using token coordinates for richer page rendering ✨ **DONE**
-- [ ] **Cache repeated queries** for sub-5ms response times on popular searches
-- [ ] **Admin dashboard** showing index health, memory usage, search stats, and package metadata
-- [ ] **Search history & saved filters** so reviewers can save favorite searches
-- [ ] **Multi-instance scaling** with shared index backend for high-volume deployments
-- [ ] **Fuzzy search** for typo tolerance ("signiture" finds "signature")
-- [ ] **Export results** to CSV/PDF for integration with other tools
-- [ ] **Query builder UI** for non-technical users without Lucene syntax knowledge
-
 ---
 
 ## ✅ What's Included
@@ -192,7 +195,7 @@ All responses are JSON. See the UI for interactive examples.
 - 3 service classes (loading, indexing, orchestration)
 - 2 controller classes (REST API, web UI)
 - 1 responsive HTML5 template (dark theme)
-- 21 tests (unit + integration, all passing)
+- 26 tests (unit + integration, all passing) ✅
 
 ### **Documentation**
 - **README.md** ← you are here
@@ -211,16 +214,6 @@ Copilot helped with:
 - Test case suggestions
 
 **Important**: Every suggestion was reviewed, tested, and refined manually. See `AGENTS.md` for detailed usage log.
-
-### **AI Usage Log**
-
-When submitting, please attach:
-- **macOS/Linux**: `~/infrrd_loan_package_search/log.txt`
-
-This file contains:
-- Your prompts to the AI tool
-- Short summaries of what the tool did
-- No code dumps, no secrets
 
 ---
 
@@ -296,12 +289,19 @@ mvn test
 ## 🎓 How to Evaluate
 
 1. **Read this README** for the big picture
-2. **Run the app** with `./mvnw spring-boot:run`
-3. **Load a test package** using the UI
-4. **Try some searches** to feel the performance
-5. **Click a result** to see the page viewer
-6. **Review the code** — it's well-organized and documented
-7. **Run tests** with `mvn test` (21 passing)
+2. **Run the app** with `./mvnw spring-boot:run` (loads default seed)
+3. **Or use a custom file** with `LOAN_DATA_ROOT=/path/to/file ./mvnw spring-boot:run`
+4. **Open the UI** at **http://localhost:8080**
+5. **Try some searches** to feel the performance:
+   - Simple: `income`
+   - Phrase: `"cash to close"`
+   - Boolean: `income AND verification`
+   - Wildcard: `sign*`
+   - OCR punctuation: `Lender Loan No./Universal Loan Identifier`
+6. **Click a result** to see the page viewer with highlighted matches
+7. **Edit the OCR file** while running, then search again to see live reload
+8. **Review the code** — it's well-organized and documented
+9. **Run tests** with `./mvnw test` (26/26 passing)
 
 ---
 
@@ -331,8 +331,9 @@ LoanPackageSearch/
 ├── src/test/java/com/example/loanpackagesearch/
 │   ├── LoanPackageSearchApplicationTests.java
 │   └── service/
-│       ├── LoanPackageModelTest.java (11 tests)
-│       └── SearchServiceIntegrationTest.java (11 tests)
+│       ├── LoanPackageModelTest.java
+│       ├── LoanPackageServiceReloadTest.java
+│       └── SearchServiceIntegrationTest.java
 ├── pom.xml
 ├── README.md (this file)
 └── AGENTS.md (AI tool usage log)
@@ -347,7 +348,7 @@ LoanPackageSearch/
 - ⚡ **Speed**: 200 ms to load & index a 1.4 MB package; 8–20 ms searches
 - 🎨 **Beauty**: Dark premium dashboard UI that's easy on the eyes
 - 🔍 **Power**: Full-text search with phrases, boolean logic, and wildcards
-- 🛡️ **Reliability**: Comprehensive error handling and 21 passing tests
+- 🛡️ **Reliability**: Comprehensive error handling and 26 passing tests
 - 📚 **Clarity**: Well-documented code and transparent AI tool usage
 
 Ready to evaluate. Thank you!
