@@ -180,14 +180,16 @@ All responses are JSON. See the UI for interactive examples.
 
 ### **Limitations**
 
-1. **In-memory index only** — Index is rebuilt after restart (solution: persist to disk)
-2. **Single package at a time** — App handles one loaded package (solution: multi-package queue)
-3. **No authentication** — Intentionally out of scope for this assignment
-4. **No audit trail** — Searches are not logged (solution: add database audit log)
-5. **500 MB memory bound per package** — Reasonable for typical loan packages (solution: switch to disk-based index for larger files)
+1. **Result limit: 1000 matches per search** — To protect performance, results are capped at 1000. Typical loan package searches return < 500 results, so this is rarely hit. (solution: add pagination for very broad queries)
+2. **In-memory index only** — Index is rebuilt after restart (solution: persist to disk)
+3. **Single package at a time** — App handles one loaded package (solution: multi-package queue)
+4. **No authentication** — Intentionally out of scope for this assignment
+5. **No audit trail** — Searches are not logged (solution: add database audit log)
+6. **500 MB memory bound per package** — Reasonable for typical loan packages (solution: switch to disk-based index for larger files)
 
 ### **What I'd Do Next (With More Time)**
 
+- [ ] **Add pagination** to `/api/search` for unlimited results
 - [ ] **Persist Lucene index** to disk so restarts are instant
 - [x] **Add word-level highlighting** using token coordinates for richer page rendering ✨ **DONE**
 - [ ] **Cache repeated queries** for sub-5ms response times on popular searches
