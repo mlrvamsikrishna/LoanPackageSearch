@@ -41,9 +41,11 @@ Navigate documents grouped by type, version, and page count. See the full packag
 
 ### 🔍 **Search with Power**
 - **Simple queries** → `income`
+- **Plain multi-word queries** → `cash close` means `cash AND close` by default
 - **Exact phrases** → `"cash to close"`
 - **Boolean logic** → `income AND verification NOT unemployment`
 - **Wildcards** → `sign*` (matches signature, signing, sign, etc.)
+- **Lucene-backed for all queries** → simple and advanced searches both use the in-memory Lucene index
 - **OCR-safe parsing** → Raw OCR punctuation like `/`, `-`, and `:` is escaped automatically when needed
 
 ### 🎯 **Ranked Results**
@@ -65,7 +67,7 @@ Every result shows:
 Click any result to see the complete page text in a beautiful dark-theme modal. No context switching.
 
 ### 🔄 **Live File Updates**
-Edit the OCR file while the app is running. The next search automatically detects the change and rebuilds the index. No restart needed.
+Edit the OCR file while the app is running. The next read or search request detects the change, reloads the package, and rebuilds the index automatically. No restart needed.
 
 ### 💪 **Graceful Error Handling**
 Missing OCR text? Empty pages? The app skips them and keeps working. You see helpful messages, not crashes.
@@ -78,7 +80,7 @@ Missing OCR text? Empty pages? The app skips them and keeps working. You see hel
 |---|---|---|
 | **Lucene in-memory index** | Fast repeated searches, simple deployment | Rebuilds on restart; uses RAM |
 | **Page-level indexing** | Results map directly to the viewer | No word-level coordinate highlighting yet |
-| **Literal fallback for plain text** | Protects against accidental Lucene syntax in OCR | Less expressive than full parser for plain queries |
+| **Plain queries use Lucene AND semantics** | Predictable defaults (`cash close` ⇒ `cash AND close`) while still using the index | Users must quote phrases explicitly for exact adjacency |
 | **Stateless + rebuild-on-change** | Easy to reason about; correct after file edits | File changes can trigger a rebuild pause |
 | **Dark premium dashboard UI** | High contrast, modern feel for reviewers | More styling work than basic light theme |
 
@@ -102,47 +104,63 @@ Why this structure?
 
 ---
 
-## 📊 Performance: What I Measured & How
+## 📊 Performance: How to Measure It Reproducibly
 
-### **Benchmark Setup**
+### **What the API Exposes**
 
-I generated a **550-page synthetic OCR sample** with realistic loan terms and measured timing:
+- `GET /api/metrics` returns the latest package load/index timings:
+  - `loadTimeMs`
+  - `indexTimeMs`
+  - `totalTimeMs`
+- `GET /api/search` returns per-request timings:
+  - `changeDetectionMs`
+  - `reloadMs`
+  - `packageLoadTimeMs` (non-zero only when that request triggered a reload)
+  - `packageIndexTimeMs` (non-zero only when that request triggered a reload)
+  - `queryPreparationMs`
+  - `luceneSearchMs`
+  - `snippetGenerationMs`
+  - `resultSortingMs`
+  - `totalRequestMs`
 
-1. Created a 550-page text file with form-feed (`\f`) separators (OCR standard)
-2. Set `LOAN_DATA_ROOT` to the test file and started the app
-3. Measured search timing on `GET /api/search?q=income` using `curl --time_total`
-4. Ran the search twice to compare first vs. repeat performance
+### **Repeatable Commands**
 
-### **Results**
+Use these commands to measure a cold startup and then repeated searches.
 
-| Metric | Value |
-|--------|-------|
-| **Total load time** | **33 ms** |
-| Lucene index build | 28 ms |
-| File read + parse | 5 ms |
-| **First search** | **12.8 ms** |
-| **Repeat search** | **7.9 ms** |
-| **Search speedup** | **~1.6x** (index already built) |
-| Memory used | 1 MB |
-| Pages indexed | 550 |
-| Total characters | 132,884 |
+#### Default seed in this repo
 
-### **What This Means**
+```bash
+cd /Users/vamsikrishna.majeti/Downloads/LoanPackageSearch
+env -u LOAN_DATA_ROOT ./mvnw spring-boot:run
+```
 
-- ⚡ **Package bring-up is fast** (~33 ms) so the UI stays responsive
-- ⚡ **Repeat searches are snappy** (~8 ms) because Lucene reuses the index
-- ⚡ **End-to-end first answer** is roughly **46 ms** (load + index + first query)
-- 💾 **Memory footprint is tiny** (1 MB for 550 pages shows the approach scales)
+In another terminal:
 
-### **Measured on Real Data Too**
+```bash
+curl -s http://localhost:8080/api/metrics
+curl -s "http://localhost:8080/api/search?q=income&limit=10&offset=0"
+curl -s "http://localhost:8080/api/search?q=income&limit=10&offset=0"
+```
 
-From earlier testing on a real 280-page loan package (1.4 MB):
-- Load: 13–14 ms
-- Index build: 183–193 ms
-- Total: ~200 ms
-- Memory: ~20 MB
+#### Supplied ~550-page sample
 
-Both synthetic and real data confirm the performance profile: **fast load, sub-20ms searches, modest memory**.
+```bash
+cd /Users/vamsikrishna.majeti/Downloads/LoanPackageSearch
+LOAN_DATA_ROOT=/absolute/path/to/supplied-550-page-sample.txt ./mvnw spring-boot:run
+```
+
+Then repeat the same `curl` calls above and record at least 3 cold runs + 3 repeat searches. Report median values for submission notes.
+
+### **Example Observations from This Project**
+
+On the default repo seed (~280 pages, ~1.4 MB), earlier local runs were in this range:
+
+- Load: ~13–14 ms
+- Index build: ~183–193 ms
+- Total package load + index: ~200 ms
+- Search: typically single-digit to low tens of milliseconds depending on query breadth
+
+These numbers are **illustrative**, not a formal benchmark report. The recommended commands above are the reproducible source of truth for your machine and for the supplied ~550-page sample.
 
 ---
 
@@ -165,7 +183,7 @@ When you click a search result to view the full page, **all matched words are au
 | `GET` | `/api/search?q=...&limit=50&offset=0` | Search with pagination (default: limit=50) |
 | `GET` | `/api/package/tree` | Get hierarchical tree structure |
 | `GET` | `/api/page?docId=...&versionId=...&pageNum=...` | Fetch full page text |
-| `GET` | `/api/metrics` | Get last load/index metrics |
+| `GET` | `/api/metrics` | Get last load/index metrics plus latest search timing breakdown |
 
 **Pagination Parameters**:
 - `q` (required): Search query
@@ -180,6 +198,18 @@ When you click a search result to view the full page, **all matched words are au
 - `pagination.hasNextPage`: Whether more pages exist
 - `pagination.hasPreviousPage`: Whether previous page exists
 
+**Search Timing Response Includes**:
+- `timings.changeDetectionMs`
+- `timings.reloadMs`
+- `timings.packageLoadTimeMs`
+- `timings.packageIndexTimeMs`
+- `timings.queryPreparationMs`
+- `timings.luceneSearchMs`
+- `timings.snippetGenerationMs`
+- `timings.resultSortingMs`
+- `timings.totalRequestMs`
+- `timings.queryMode`
+
 All responses are JSON. See the UI for interactive examples.
 
 ---
@@ -190,7 +220,7 @@ All responses are JSON. See the UI for interactive examples.
 - **Search Engine**: Apache Lucene 9.8.0 (in-memory index via `ByteBuffersDirectory`)
 - **Frontend**: HTML5 + CSS3 + vanilla JavaScript (no framework)
 - **Build**: Maven 3.8+
-- **Testing**: JUnit 5 (29 tests, all passing)
+- **Testing**: JUnit 5 (35 tests, all passing)
 
 ---
 
@@ -199,7 +229,7 @@ All responses are JSON. See the UI for interactive examples.
 ### **Limitations**
 
 1. **Result cap: 1000 matches per search** — To protect memory, results are capped at 1000 total (paginated in 50-result chunks). Typical loan package searches return < 500 results, so this is rarely hit. (solution: lazy-load infinite scroll for very large result sets)
-2. **Package size limit: 500 MB** — In-memory Lucene index is suitable for packages up to ~500 MB (~25,000 pages). Larger packages should be split and loaded separately. (solution: persist index to disk for unlimited size)
+2. **Package size guard: 500 MB input file** — The app rejects source files larger than 500 MB before loading. This is a practical bound on accepted input size, not a formal proof of JVM heap usage. Larger packages should be split or indexed on disk. (solution: persist index to disk for larger datasets)
 3. **In-memory index only** — Index is rebuilt after restart (solution: persist to disk)
 4. **Single package at a time** — App handles one loaded package (solution: multi-package queue)
 5. **No authentication** — Intentionally out of scope for this assignment
@@ -227,7 +257,7 @@ All responses are JSON. See the UI for interactive examples.
 - 3 service classes (loading, indexing, orchestration)
 - 2 controller classes (REST API, web UI)
 - 1 responsive HTML5 template (dark theme)
-- 29 tests (unit + integration, all passing) ✅
+- 35 tests (unit + integration, all passing) ✅
 
 ### **Documentation**
 - **README.md** ← you are here
@@ -253,10 +283,10 @@ Copilot helped with:
 
 ### **Design**
 
-**Limit**: 500 MB max package size
-- Rationale: Lucene in-memory index scales ~1 MB per 50 OCR pages
-- At 500 MB, we can index ~25,000 pages
-- Typical loan packages: 280–1000 pages (well within limit)
+**Input guard**: 500 MB max package file size
+- Rationale: keeps the in-memory load/index flow within a practical single-package envelope for this assignment
+- Typical loan packages: 280–1000 pages (well within that envelope)
+- Important: this is **not** a formal JVM heap cap; Lucene structures and object overhead still depend on the actual content
 
 **Index Lifecycle**:
 1. **Load** → Parse OCR file into memory (tracks char count)
@@ -264,11 +294,13 @@ Copilot helped with:
 3. **Reload** → On file change, close old reader AND directory, then rebuild (prevents memory leak)
 4. **Shutdown** → Close reader and directory on app exit (@PreDestroy)
 
-**Memory Guarantees**:
+**Memory / Index Guarantees**:
 - ✅ Old directory properly closed during rebuild (no leak on file modification)
 - ✅ Only one active index in memory at a time
 - ✅ No unbounded query cache (search is stateless)
 - ✅ Package size validated before load (rejects > 500 MB files)
+- ✅ All search modes use the same Lucene index; there is no page-by-page substring fallback path anymore
+- ⚠️ Heap usage is bounded operationally by one loaded package + one active index, but not by a strict runtime heap quota in code
 
 
 
@@ -292,8 +324,8 @@ Copilot helped with:
 - **Single Responsibility**: Each class has one reason to change
 - **Immutability**: Data structures are defensive copies (thread-safe)
 - **Graceful Degradation**: Missing OCR doesn't crash the app
-- **Performance Monitoring**: Load times, index time, and search time are tracked
-- **File Change Detection**: Transparent index rebuild without restart
+- **Performance Monitoring**: Load/index metrics and per-stage search timings are exposed via the API
+- **File Change Detection**: Transparent package reload on the next read or search request
 
 ---
 
@@ -303,15 +335,17 @@ Copilot helped with:
 mvn test
 ```
 
-**Results**: 29/29 tests passing ✅
+**Results**: 35/35 tests passing ✅
 
 ### **Test Coverage**
 
 - ✅ Data model validation (creation, retrieval, immutability)
 - ✅ Search functionality (simple, phrase, wildcard, boolean)
+- ✅ Plain multi-word AND semantics and per-stage search timing metrics
 - ✅ File loading and parsing (form-feed separator, page detection)
 - ✅ Index building and performance measurement
 - ✅ File modification detection
+- ✅ Concurrent reload/search stability
 - ✅ Result sorting by relevance
 - ✅ Edge cases (empty queries, missing pages, malformed input)
 
@@ -319,7 +353,7 @@ mvn test
 
 ## 💡 Key Insights
 
-1. **Lucene is worth it** — The performance gain from Lucene vs. simple string matching justifies the complexity.
+1. **Lucene is worth it** — Both plain and advanced queries now use the same index, so repeated searches stay fast without scanning every page.
 2. **In-memory is fast enough** — For typical loan packages (< 100 MB), RAM is perfectly fine. Disk-based indexing is a future optimization, not a current need.
 3. **Page-level indexing is the right grain** — Users care about pages, not individual words. This keeps results relevant and the viewer simple.
 4. **File change detection is valuable** — Reviewers edit OCR files in place. Transparent rebuild (no restart) makes the app feel modern and responsive.
@@ -329,10 +363,10 @@ mvn test
 
 ## 📝 Notes for Reviewers
 
-- This is a **Spring Boot + Maven** project (no Node.js / `package.json`)
+- This is a **Spring Boot + Maven** project
 - The app is **API-first** but also includes a beautiful browser UI
 - **All source code is readable and self-documenting** with clear naming and inline Javadoc
-- **Performance is observable** — metrics are exposed via `/api/metrics` and logged to stdout
+- **Performance is observable** — package timings are exposed via `/api/metrics`, and each `/api/search` response includes a per-stage timing breakdown
 - **Error messages are helpful** — the UI shows clear, actionable feedback
 - **The test suite is comprehensive** — run `mvn test` to verify correctness
 
@@ -351,9 +385,9 @@ mvn test
    - Wildcard: `sign*`
    - OCR punctuation: `Lender Loan No./Universal Loan Identifier`
 6. **Click a result** to see the page viewer with highlighted matches
-7. **Edit the OCR file** while running, then search again to see live reload
+7. **Edit the OCR file** while running, then refresh the tree/page/metrics view or search again to see live reload
 8. **Review the code** — it's well-organized and documented
-9. **Run tests** with `./mvnw test` (29/29 passing)
+9. **Run tests** with `./mvnw test` (35/35 passing)
 
 ---
 
@@ -399,10 +433,10 @@ LoanPackageSearch/
 
 **Loan Package Search** is a fast, beautiful, production-ready tool for mortgage reviewers. It combines:
 
-- ⚡ **Speed**: 200 ms to load & index a 1.4 MB package; 8–20 ms searches
+- ⚡ **Speed**: Real package loads around ~200 ms on prior local runs, and search-stage timings are exposed on every request
 - 🎨 **Beauty**: Dark premium dashboard UI that's easy on the eyes
 - 🔍 **Power**: Full-text search with phrases, boolean logic, and wildcards
-- 🛡️ **Reliability**: Comprehensive error handling and 29 passing tests
+- 🛡️ **Reliability**: Comprehensive error handling and 35 passing tests
 - 📚 **Clarity**: Well-documented code and transparent AI tool usage
 
 Ready to evaluate. Thank you!
@@ -413,6 +447,6 @@ Ready to evaluate. Thank you!
 **Language**: Java 17+  
 **Framework**: Spring Boot 4.1.1  
 **Search**: Apache Lucene 9.8.0  
-**Tests**: 29/29 passing ✅
+**Tests**: 35/35 passing ✅
 **Status**: Production Ready
 

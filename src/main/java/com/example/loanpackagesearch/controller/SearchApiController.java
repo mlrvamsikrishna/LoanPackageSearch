@@ -70,9 +70,9 @@ public class SearchApiController {
             limit = Math.max(1, Math.min(limit, 1000));  // Clamp between 1 and 1000
             offset = Math.max(0, offset);                 // Ensure offset is non-negative
 
-            long startTime = System.currentTimeMillis();
-            List<SearchResult> allResults = loanPackageService.search(query);
-            long endTime = System.currentTimeMillis();
+            LoanPackageService.SearchRequestResult searchResult = loanPackageService.searchWithMetrics(query);
+            List<SearchResult> allResults = searchResult.results();
+            LoanPackageService.SearchRequestMetrics timings = searchResult.metrics();
 
             // Calculate pagination
             int totalResults = allResults.size();
@@ -99,7 +99,8 @@ public class SearchApiController {
                     "query", query,
                     "totalResults", totalResults,
                     "resultCount", pageResults.size(),
-                    "searchTimeMs", endTime - startTime,
+                    "searchTimeMs", timings.totalRequestMs(),
+                    "timings", buildTimingMap(timings),
                     "pagination", Map.of(
                             "currentPage", currentPage,
                             "pageSize", limit,
@@ -126,6 +127,7 @@ public class SearchApiController {
     @GetMapping("/package/structure")
     public ResponseEntity<?> getPackageStructure() {
         try {
+            loanPackageService.refreshPackageIfModified();
             LoanPackage pkg = loanPackageService.getCurrentPackage();
             if (pkg == null) {
                 return ResponseEntity.ok(Map.of("error", "No package loaded"));
@@ -161,6 +163,7 @@ public class SearchApiController {
     @GetMapping("/package/tree")
     public ResponseEntity<?> getPackageTree() {
         try {
+            loanPackageService.refreshPackageIfModified();
             LoanPackage pkg = loanPackageService.getCurrentPackage();
             if (pkg == null) {
                 return ResponseEntity.ok(Map.of("error", "No package loaded"));
@@ -199,6 +202,7 @@ public class SearchApiController {
                                      @RequestParam String versionId,
                                      @RequestParam int pageNum) {
         try {
+            loanPackageService.refreshPackageIfModified();
             LoanPackage pkg = loanPackageService.getCurrentPackage();
             if (pkg == null) {
                 return ResponseEntity.ok(Map.of("error", "No package loaded"));
@@ -245,20 +249,28 @@ public class SearchApiController {
     @GetMapping("/metrics")
     public ResponseEntity<?> getMetrics() {
         try {
+            loanPackageService.refreshPackageIfModified();
             LoanPackageService.PerformanceMetrics metrics = loanPackageService.getLastMetrics();
             if (metrics == null) {
                 return ResponseEntity.ok(Map.of("error", "No metrics available"));
             }
 
-            return ResponseEntity.ok(Map.of(
-                    "status", "success",
-                    "loadTimeMs", metrics.loadTimeMs,
-                    "indexTimeMs", metrics.indexTimeMs,
-                    "totalTimeMs", metrics.totalTimeMs,
-                    "memoryUsedMB", metrics.memoryUsedBytes / 1024 / 1024,
-                    "totalPages", metrics.totalPages,
-                    "totalCharacters", metrics.totalCharacters
-            ));
+            LoanPackageService.SearchRequestMetrics searchMetrics = loanPackageService.getLastSearchMetrics();
+
+            Map<String, Object> response = new java.util.LinkedHashMap<>();
+            response.put("status", "success");
+            response.put("loadTimeMs", metrics.loadTimeMs);
+            response.put("indexTimeMs", metrics.indexTimeMs);
+            response.put("totalTimeMs", metrics.totalTimeMs);
+            response.put("memoryUsedMB", metrics.memoryUsedBytes / 1024 / 1024);
+            response.put("totalPages", metrics.totalPages);
+            response.put("totalCharacters", metrics.totalCharacters);
+
+            if (searchMetrics != null) {
+                response.put("lastSearchTimings", buildTimingMap(searchMetrics));
+            }
+
+            return ResponseEntity.ok(response);
 
         } catch (Exception e) {
             logger.severe("Error getting metrics: " + e.getMessage());
@@ -285,6 +297,24 @@ public class SearchApiController {
                 "documentId", result.getDocumentId(),
                 "versionId", result.getVersionId()
         );
+    }
+
+    private Map<String, Object> buildTimingMap(LoanPackageService.SearchRequestMetrics timings) {
+        Map<String, Object> timingMap = new java.util.LinkedHashMap<>();
+        timingMap.put("changeDetectionMs", timings.changeDetectionMs());
+        timingMap.put("reloadMs", timings.reloadMs());
+        timingMap.put("reloaded", timings.reloaded());
+        timingMap.put("packageLoadTimeMs", timings.packageLoadTimeMs());
+        timingMap.put("packageIndexTimeMs", timings.packageIndexTimeMs());
+        timingMap.put("queryPreparationMs", timings.queryPreparationMs());
+        timingMap.put("luceneSearchMs", timings.luceneSearchMs());
+        timingMap.put("snippetGenerationMs", timings.snippetGenerationMs());
+        timingMap.put("resultSortingMs", timings.resultSortingMs());
+        timingMap.put("totalRequestMs", timings.totalRequestMs());
+        timingMap.put("queryMode", timings.queryMode());
+        timingMap.put("normalizedQuery", timings.normalizedQuery());
+        timingMap.put("totalHits", timings.totalHits());
+        return timingMap;
     }
 
     /**

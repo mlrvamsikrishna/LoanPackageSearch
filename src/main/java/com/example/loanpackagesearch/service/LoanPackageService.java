@@ -46,7 +46,30 @@ public class LoanPackageService {
     // Cached package and metrics
     private LoanPackage currentPackage;
     private PerformanceMetrics lastMetrics;
+    private SearchRequestMetrics lastSearchMetrics;
     private boolean isCurrentPackageDefault;  // Track if using default vs override
+
+    public record SearchRequestMetrics(
+            long changeDetectionMs,
+            long reloadMs,
+            boolean reloaded,
+            long packageLoadTimeMs,
+            long packageIndexTimeMs,
+            long queryPreparationMs,
+            long luceneSearchMs,
+            long snippetGenerationMs,
+            long resultSortingMs,
+            long totalRequestMs,
+            String queryMode,
+            String normalizedQuery,
+            int totalHits) {
+    }
+
+    public record SearchRequestResult(List<SearchResult> results, SearchRequestMetrics metrics) {
+    }
+
+    private record RefreshOutcome(long changeDetectionMs, long reloadMs, boolean reloaded) {
+    }
 
     @PostConstruct
     public void initializeDefaultPackage() {
@@ -71,25 +94,59 @@ public class LoanPackageService {
      * @throws IOException if search fails
      */
     public synchronized List<SearchResult> search(String queryString) throws IOException {
-        ensurePackageLoaded();
+        return searchWithMetrics(queryString).results();
+    }
+
+    /**
+     * Searches the current package and returns detailed per-stage timings.
+     */
+    public synchronized SearchRequestResult searchWithMetrics(String queryString) throws IOException {
+        long requestStart = System.nanoTime();
+        RefreshOutcome refreshOutcome = refreshPackageIfModifiedInternal();
 
         if (currentPackage == null) {
             logger.warning("No package loaded");
-            return Collections.emptyList();
+            lastSearchMetrics = new SearchRequestMetrics(
+                    refreshOutcome.changeDetectionMs,
+                    refreshOutcome.reloadMs,
+                    refreshOutcome.reloaded,
+                    refreshOutcome.reloaded && lastMetrics != null ? lastMetrics.loadTimeMs : 0,
+                    refreshOutcome.reloaded && lastMetrics != null ? lastMetrics.indexTimeMs : 0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    nanosToMillis(System.nanoTime() - requestStart),
+                    "empty",
+                    queryString == null ? "" : queryString.trim(),
+                    0);
+            return new SearchRequestResult(Collections.emptyList(), lastSearchMetrics);
         }
 
-        if (currentPackage.isSourceFileModified()) {
-            logger.info("Source file modified, reloading package from disk: " + currentPackage.getSourceFile().getAbsolutePath());
-            loadAndIndexPackage(currentPackage.getSourceFile(), currentPackage.getPackageName(), isCurrentPackageDefault);
-        }
+        SearchIndexService.SearchExecution execution = searchIndexService.searchWithMetrics(queryString);
+        List<SearchResult> results = new ArrayList<>(execution.results());
 
-        // Execute search
-        List<SearchResult> results = searchIndexService.search(queryString);
-
-        // Results are already sorted by relevance score via SearchResult.compareTo()
+        long sortStart = System.nanoTime();
         Collections.sort(results);
+        long resultSortingMs = nanosToMillis(System.nanoTime() - sortStart);
 
-        return results;
+        SearchIndexService.SearchStageMetrics searchMetrics = execution.metrics();
+        lastSearchMetrics = new SearchRequestMetrics(
+                refreshOutcome.changeDetectionMs,
+                refreshOutcome.reloadMs,
+                refreshOutcome.reloaded,
+                refreshOutcome.reloaded && lastMetrics != null ? lastMetrics.loadTimeMs : 0,
+                refreshOutcome.reloaded && lastMetrics != null ? lastMetrics.indexTimeMs : 0,
+                searchMetrics.queryPreparationMs(),
+                searchMetrics.luceneSearchMs(),
+                searchMetrics.snippetGenerationMs(),
+                resultSortingMs,
+                nanosToMillis(System.nanoTime() - requestStart),
+                searchMetrics.queryMode(),
+                searchMetrics.normalizedQuery(),
+                searchMetrics.totalHits());
+
+        return new SearchRequestResult(results, lastSearchMetrics);
     }
 
     /**
@@ -108,6 +165,10 @@ public class LoanPackageService {
      */
     public synchronized PerformanceMetrics getLastMetrics() {
         return lastMetrics;
+    }
+
+    public synchronized SearchRequestMetrics getLastSearchMetrics() {
+        return lastSearchMetrics;
     }
 
     /**
@@ -134,8 +195,16 @@ public class LoanPackageService {
     public synchronized void clearPackage() {
         currentPackage = null;
         lastMetrics = null;
+        lastSearchMetrics = null;
         isCurrentPackageDefault = false;
         logger.info("Package cleared from memory");
+    }
+
+    /**
+     * Ensures the package is loaded and refreshed before read-only endpoints respond.
+     */
+    public synchronized void refreshPackageIfModified() throws IOException {
+        refreshPackageIfModifiedInternal();
     }
 
     private void ensurePackageLoaded() throws IOException {
@@ -145,12 +214,35 @@ public class LoanPackageService {
         loadDefaultPackageIfAvailable();
     }
 
+    private RefreshOutcome refreshPackageIfModifiedInternal() throws IOException {
+        if (currentPackage == null) {
+            long reloadStart = System.nanoTime();
+            ensurePackageLoaded();
+            long reloadMs = currentPackage == null ? 0 : nanosToMillis(System.nanoTime() - reloadStart);
+            return new RefreshOutcome(0, reloadMs, currentPackage != null);
+        }
+
+        long changeStart = System.nanoTime();
+        boolean modified = currentPackage.isSourceFileModified();
+        long changeDetectionMs = nanosToMillis(System.nanoTime() - changeStart);
+
+        if (!modified) {
+            return new RefreshOutcome(changeDetectionMs, 0, false);
+        }
+
+        logger.info("Source file modified, reloading package from disk: " + currentPackage.getSourceFile().getAbsolutePath());
+        long reloadStart = System.nanoTime();
+        loadAndIndexPackage(currentPackage.getSourceFile(), currentPackage.getPackageName(), isCurrentPackageDefault);
+        return new RefreshOutcome(changeDetectionMs, nanosToMillis(System.nanoTime() - reloadStart), true);
+    }
+
     private void loadDefaultPackageIfAvailable() throws IOException {
         File defaultFile = resolveSeedFile();
         if (defaultFile.exists() && defaultFile.isFile()) {
-            logger.info("Loading default seed package from: " + defaultFile.getAbsolutePath());
             // Determine if this is truly the default or an override
             boolean isDefault = isDefaultDataRoot();
+            logger.info("Configured dataRoot='" + dataRoot + "', seedFile='" + seedFileName + "', mode=" + (isDefault ? "DEFAULT" : "CUSTOM"));
+            logger.info((isDefault ? "Loading default seed package from: " : "Loading custom seed package from: ") + defaultFile.getAbsolutePath());
             String packageName = isDefault ? "Default Seed Package" : "Custom Package";
             loadAndIndexPackage(defaultFile, packageName, isDefault);
         } else {
@@ -255,5 +347,9 @@ public class LoanPackageService {
             return String.format("Metrics{load=%dms, index=%dms, total=%dms, memory=%dMB, pages=%d, chars=%d}",
                     loadTimeMs, indexTimeMs, totalTimeMs, memoryUsedBytes / 1024 / 1024, totalPages, totalCharacters);
         }
+    }
+
+    private long nanosToMillis(long nanos) {
+        return nanos / 1_000_000;
     }
 }

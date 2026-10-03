@@ -16,6 +16,7 @@ import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.queryparser.classic.MultiFieldQueryParser;
 import org.apache.lucene.queryparser.classic.ParseException;
+import org.apache.lucene.queryparser.classic.QueryParser;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.ScoreDoc;
@@ -58,6 +59,25 @@ public class SearchIndexService {
     private DirectoryReader reader;
     private LoanPackage currentPackage;
     private long indexBuildTimeMs;
+
+    public record SearchStageMetrics(
+            long queryPreparationMs,
+            long luceneSearchMs,
+            long snippetGenerationMs,
+            long totalSearchMs,
+            String queryMode,
+            String normalizedQuery,
+            int totalHits) {
+
+        public static SearchStageMetrics empty(String queryString) {
+            String normalized = queryString == null ? "" : queryString.trim();
+            return new SearchStageMetrics(0, 0, 0, 0, "empty", normalized, 0);
+        }
+    }
+
+    public record SearchExecution(List<SearchResult> results, SearchStageMetrics metrics) {}
+
+    private record PreparedQuery(Query query, String normalizedQuery, String queryMode) {}
 
     /**
      * Builds or rebuilds the in-memory Lucene index for the given package.
@@ -119,74 +139,80 @@ public class SearchIndexService {
     }
 
     /**
-     * Searches the current in-memory index using either literal or Lucene syntax.
+     * Searches the current in-memory index and returns detailed timing metadata.
+     */
+    public synchronized SearchExecution searchWithMetrics(String queryString) throws IOException {
+        if (reader == null || currentPackage == null || queryString == null || queryString.trim().isEmpty()) {
+            return new SearchExecution(Collections.emptyList(), SearchStageMetrics.empty(queryString));
+        }
+
+        String trimmedQuery = queryString.trim();
+        long searchStart = System.nanoTime();
+
+        PreparedQuery preparedQuery = prepareQuery(trimmedQuery);
+        long afterPreparation = System.nanoTime();
+
+        IndexSearcher searcher = new IndexSearcher(reader);
+        TopDocs topDocs = searcher.search(preparedQuery.query(), MAX_RESULTS);
+        long afterLucene = System.nanoTime();
+
+        List<SearchResult> results = new ArrayList<>();
+        long snippetNanos = 0L;
+        for (ScoreDoc scoreDoc : topDocs.scoreDocs) {
+            org.apache.lucene.document.Document luceneDoc = searcher.storedFields().document(scoreDoc.doc);
+            long snippetStart = System.nanoTime();
+            results.add(createSearchResult(luceneDoc, scoreDoc.score, trimmedQuery));
+            snippetNanos += System.nanoTime() - snippetStart;
+        }
+
+        SearchStageMetrics metrics = new SearchStageMetrics(
+                nanosToMillis(afterPreparation - searchStart),
+                nanosToMillis(afterLucene - afterPreparation),
+                nanosToMillis(snippetNanos),
+                nanosToMillis(System.nanoTime() - searchStart),
+                preparedQuery.queryMode(),
+                preparedQuery.normalizedQuery(),
+                topDocs.scoreDocs.length);
+
+        logger.info("Search completed: " + results.size()
+                + " results, mode=" + metrics.queryMode()
+                + ", timings={prepare=" + metrics.queryPreparationMs()
+                + "ms, lucene=" + metrics.luceneSearchMs()
+                + "ms, snippet=" + metrics.snippetGenerationMs()
+                + "ms, total=" + metrics.totalSearchMs() + "ms}");
+        return new SearchExecution(results, metrics);
+    }
+
+    /**
+     * Searches the current in-memory index using Lucene for both plain and advanced syntax.
      *
      * @param queryString raw user query
      * @return ranked search results, or an empty list when the index is unavailable
      * @throws IOException if Lucene parsing/search fails
      */
     public synchronized List<SearchResult> search(String queryString) throws IOException {
-        if (reader == null || currentPackage == null || queryString == null || queryString.trim().isEmpty()) {
-            return Collections.emptyList();
-        }
-
-        String trimmedQuery = queryString.trim();
-        long startTime = System.currentTimeMillis();
-
-        if (!isLuceneSyntaxQuery(trimmedQuery)) {
-            List<SearchResult> literalResults = searchLiteral(trimmedQuery);
-            logger.info("Search completed: " + literalResults.size() + " results in " + (System.currentTimeMillis() - startTime) + "ms");
-            return literalResults;
-        }
-
-        try {
-            MultiFieldQueryParser parser = new MultiFieldQueryParser(new String[]{FIELD_PAGE_CONTENT}, analyzer);
-            parser.setAllowLeadingWildcard(true);
-            Query query = parser.parse(sanitizeLuceneQuery(trimmedQuery));
-
-            IndexSearcher searcher = new IndexSearcher(reader);
-            TopDocs topDocs = searcher.search(query, MAX_RESULTS);
-            List<SearchResult> results = new ArrayList<>();
-            for (ScoreDoc scoreDoc : topDocs.scoreDocs) {
-                org.apache.lucene.document.Document luceneDoc = searcher.storedFields().document(scoreDoc.doc);
-                results.add(createSearchResult(luceneDoc, scoreDoc.score, trimmedQuery));
-            }
-
-            logger.info("Search completed: " + results.size() + " results in " + (System.currentTimeMillis() - startTime) + "ms");
-            return results;
-        } catch (ParseException e) {
-            throw new IOException("Invalid search query: " + e.getMessage(), e);
-        }
+        return searchWithMetrics(queryString).results();
     }
 
     /**
-     * Performs an exact substring search over the raw OCR text.
-     *
-     * @param literalQuery trimmed plain-text query
-     * @return matching search results
+     * Converts a raw user query into a Lucene query with predictable semantics.
      */
-    private List<SearchResult> searchLiteral(String literalQuery) {
-        List<SearchResult> results = new ArrayList<>();
-        for (Document modelDoc : currentPackage.getDocuments()) {
-            for (Version version : modelDoc.getVersions()) {
-                for (Page page : version.getPages()) {
-                    String pageText = page.getOcrText();
-                    if (pageText != null && pageText.contains(literalQuery)) {
-                        results.add(createSearchResult(
-                                modelDoc.getDocumentId(),
-                                modelDoc.getDocumentName(),
-                                modelDoc.getDocumentType(),
-                                version.getVersionId(),
-                                version.getVersionName(),
-                                page.getPageNumber(),
-                                pageText,
-                                literalQuery,
-                                10.0d));
-                    }
-                }
+    private PreparedQuery prepareQuery(String trimmedQuery) throws IOException {
+        try {
+            MultiFieldQueryParser parser = new MultiFieldQueryParser(new String[]{FIELD_PAGE_CONTENT}, analyzer);
+            parser.setAllowLeadingWildcard(true);
+
+            if (isLuceneSyntaxQuery(trimmedQuery)) {
+                String normalized = sanitizeLuceneQuery(trimmedQuery);
+                return new PreparedQuery(parser.parse(normalized), normalized, "lucene");
             }
+
+            parser.setDefaultOperator(QueryParser.Operator.AND);
+            String normalized = sanitizePlainQuery(trimmedQuery);
+            return new PreparedQuery(parser.parse(normalized), normalized, "plain-and");
+        } catch (ParseException e) {
+            throw new IOException("Invalid search query: " + e.getMessage(), e);
         }
-        return results;
     }
 
     /**
@@ -285,7 +311,29 @@ public class SearchIndexService {
         if (isLuceneSyntaxQuery(queryText)) {
             terms.addAll(extractQueryTerms(queryText));
         } else {
-            terms.add(queryText.trim());
+            terms.addAll(extractPlainTerms(queryText));
+            if (terms.isEmpty()) {
+                terms.add(queryText.trim());
+            }
+        }
+        terms.sort((a, b) -> Integer.compare(b.length(), a.length()));
+        return terms;
+    }
+
+    /**
+     * Splits a plain user query into searchable terms with default AND semantics.
+     */
+    private List<String> extractPlainTerms(String queryText) {
+        List<String> terms = new ArrayList<>();
+        if (queryText == null || queryText.isBlank()) {
+            return terms;
+        }
+
+        for (String token : queryText.trim().split("\\s+")) {
+            String cleaned = token.replaceAll("^[^\\p{L}\\p{Nd}]+|[^\\p{L}\\p{Nd}./-]+$", "");
+            if (!cleaned.isBlank()) {
+                terms.add(cleaned);
+            }
         }
         return terms;
     }
@@ -305,7 +353,7 @@ public class SearchIndexService {
 
         String withoutQuotes = queryText.replaceAll("\"[^\"]+\"", " ");
         for (String token : withoutQuotes.split("\\s+")) {
-            String cleaned = token.replaceAll("^[^\\p{L}\\p{Nd}]+|[^\\p{L}\\p{Nd}\\*]+$", "").replaceAll("\\*+$", "");
+            String cleaned = token.replaceAll("^[^\\p{L}\\p{Nd}]+|[^\\p{L}\\p{Nd}*]+$", "").replaceAll("\\*+$", "");
             if (!cleaned.isBlank() && !cleaned.equalsIgnoreCase("AND") && !cleaned.equalsIgnoreCase("OR") && !cleaned.equalsIgnoreCase("NOT")) {
                 terms.add(cleaned);
             }
@@ -337,6 +385,21 @@ public class SearchIndexService {
         }
 
         return String.join(" ", tokens);
+    }
+
+    /**
+     * Escapes a plain query while preserving whitespace-delimited terms.
+     */
+    private String sanitizePlainQuery(String queryText) {
+        List<String> terms = extractPlainTerms(queryText);
+        if (terms.isEmpty()) {
+            return escapeLuceneTerm(queryText.trim());
+        }
+        List<String> escapedTerms = new ArrayList<>(terms.size());
+        for (String term : terms) {
+            escapedTerms.add(escapeLuceneTerm(term));
+        }
+        return String.join(" ", escapedTerms);
     }
 
     /**
@@ -381,6 +444,10 @@ public class SearchIndexService {
                 || ch == ':'
                 || ch == '\\'
                 || ch == '/';
+    }
+
+    private long nanosToMillis(long nanos) {
+        return nanos / 1_000_000;
     }
 
     /**

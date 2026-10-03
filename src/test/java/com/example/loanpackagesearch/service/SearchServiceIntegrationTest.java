@@ -54,8 +54,7 @@ public class SearchServiceIntegrationTest {
         indexService.buildIndex(testPackage);
 
         List<SearchResult> results = indexService.search("\"income verification\"");
-        // Should find exact phrase or partial matches
-        assertNotNull(results);
+        assertFalse(results.isEmpty(), "Exact phrase query should use Lucene and find the matching page");
     }
 
     @Test
@@ -84,27 +83,27 @@ public class SearchServiceIntegrationTest {
     }
 
     @Test
-    public void testLiteralSearchWithPunctuation() throws IOException {
+    public void testPlainMultiWordQueryUsesAndSemantics() throws IOException {
         indexService.buildIndex(testPackage);
 
-        List<SearchResult> results = indexService.search("Lender Loan No./Universal Loan Identifier///////////");
-        assertTrue(results.isEmpty(), "Extra trailing punctuation should not match when exact text is absent");
+        List<SearchResult> results = indexService.search("income verification");
+        assertFalse(results.isEmpty(), "Plain multi-word queries should match pages containing all terms");
     }
 
     @Test
-    public void testExactLiteralSearchMatches() throws IOException {
+    public void testPlainMultiWordQueryReturnsNoMatchWhenTermsSplitAcrossPages() throws IOException {
         indexService.buildIndex(testPackage);
 
-        List<SearchResult> results = indexService.search("Lender Loan No./Universal Loan Identifier - which is in");
-        assertFalse(results.isEmpty(), "Exact literal OCR text should still be searchable");
+        List<SearchResult> results = indexService.search("income reserves");
+        assertTrue(results.isEmpty(), "Plain queries default to AND semantics, so terms must appear on the same page");
     }
 
     @Test
-    public void testBrokenLiteralSearchWithInternalSlashFails() throws IOException {
+    public void testPlainSearchHandlesOcrPunctuationViaLucene() throws IOException {
         indexService.buildIndex(testPackage);
 
-        List<SearchResult> results = indexService.search("Lender Loan No./Universal Loan Identi/fier///////////");
-        assertTrue(results.isEmpty(), "Broken internal token fragments should not match the exact OCR text");
+        List<SearchResult> results = indexService.search("Lender Loan No./Universal Loan Identifier");
+        assertFalse(results.isEmpty(), "Plain queries with OCR punctuation should still search through the Lucene index");
     }
 
     @Test
@@ -174,6 +173,22 @@ public class SearchServiceIntegrationTest {
 
         indexService.search("income");
         // Search should complete quickly with built index
+    }
+
+    @Test
+    public void testSearchWithMetricsIncludesPerStageBreakdown() throws IOException {
+        indexService.buildIndex(testPackage);
+
+        SearchIndexService.SearchExecution execution = indexService.searchWithMetrics("income verification");
+
+        assertFalse(execution.results().isEmpty());
+        assertEquals("plain-and", execution.metrics().queryMode());
+        assertEquals("income verification", execution.metrics().normalizedQuery());
+        assertTrue(execution.metrics().queryPreparationMs() >= 0);
+        assertTrue(execution.metrics().luceneSearchMs() >= 0);
+        assertTrue(execution.metrics().snippetGenerationMs() >= 0);
+        assertTrue(execution.metrics().totalSearchMs() >= 0);
+        assertTrue(execution.metrics().totalHits() >= execution.results().size());
     }
 
     // Helper method to create test package
