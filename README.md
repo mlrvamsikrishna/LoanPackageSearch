@@ -186,6 +186,18 @@ All responses are JSON. See the UI for interactive examples.
 4. **No audit trail** — Searches are not logged (solution: add database audit log)
 5. **500 MB memory bound per package** — Reasonable for typical loan packages (solution: switch to disk-based index for larger files)
 
+### **What I'd Do Next (With More Time)**
+
+- [ ] **Persist Lucene index** to disk so restarts are instant
+- [x] **Add word-level highlighting** using token coordinates for richer page rendering ✨ **DONE**
+- [ ] **Cache repeated queries** for sub-5ms response times on popular searches
+- [ ] **Admin dashboard** showing index health, memory usage, search stats, and package metadata
+- [ ] **Search history & saved filters** so reviewers can save favorite searches
+- [ ] **Multi-instance scaling** with shared index backend for high-volume deployments
+- [ ] **Fuzzy search** for typo tolerance ("signiture" finds "signature")
+- [ ] **Export results** to CSV/PDF for integration with other tools
+- [ ] **Query builder UI** for non-technical users without Lucene syntax knowledge
+
 ---
 
 ## ✅ What's Included
